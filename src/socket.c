@@ -4,10 +4,17 @@
 ** See Copyright Notice in mruby.h
 */
 
+#ifndef HAVE_LWIP
+#define MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
+#define MRBGEM_SOCKET_HAVE_IPv6
+#endif
+
 #include "mruby.h"
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/un.h>
+#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
+# include <sys/un.h>
+#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -31,8 +38,11 @@ static mrb_value
 mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
 {
   struct addrinfo hints, *res0, *res;
+#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
   struct sockaddr_un sun;
-  mrb_value ai, ary, family, lastai, nodename, protocol, s, sa, service, socktype;
+  mrb_value s;
+#endif
+  mrb_value ai, ary, family, lastai, nodename, protocol, sa, service, socktype;
   mrb_int flags;
   int arena_idx, error;
   const char *hostname = NULL, *servname = NULL;
@@ -40,7 +50,9 @@ mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
   ary = mrb_ary_new(mrb);
   arena_idx = mrb_gc_arena_save(mrb);  /* ary must be on arena! */
 
+#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
   s = mrb_str_new(mrb, (void *)&sun, sizeof(sun));
+#endif
 
   family = socktype = protocol = mrb_nil_value();
   flags = 0;
@@ -131,12 +143,17 @@ mrb_addrinfo_getnameinfo(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_addrinfo_unix_path(mrb_state *mrb, mrb_value self)
 {
+#ifdef SOCKET_C_SUPPORT_UN__
   mrb_value sastr;
 
   sastr = mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@sockaddr"));
   if (((struct sockaddr *)RSTRING_PTR(sastr))->sa_family != AF_UNIX)
     mrb_raise(mrb, E_SOCKET_ERROR, "need AF_UNIX address");
   return mrb_str_new_cstr(mrb, ((struct sockaddr_un *)RSTRING_PTR(sastr))->sun_path);
+#else
+  mrb_raise(mrb, E_SOCKET_ERROR, "This runtime doesn't support UNIX domains");
+  return mrb_nil_value(); /* NOT REACHED */
+#endif
 }
 
 static mrb_value
@@ -151,10 +168,12 @@ sa2addrlist(mrb_state *mrb, const struct sockaddr *sa, socklen_t salen)
     afstr = "AF_INET";
     port = ((struct sockaddr_in *)sa)->sin_port;
     break;
+#ifdef MRBGEM_SOCKET_HAVE_IPv6
   case AF_INET6:
     afstr = "AF_INET6";
     port = ((struct sockaddr_in6 *)sa)->sin6_port;
     break;
+#endif
   default:
     mrb_raise(mrb, E_ARGUMENT_ERROR, "bad af");
     return mrb_nil_value();
@@ -309,7 +328,7 @@ mrb_basicsocket_send(mrb_state *mrb, mrb_value self)
   if (mrb_nil_p(dest)) {
     n = send(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags);
   } else {
-    n = sendto(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags, (const void *)RSTRING_PTR(dest), RSTRING_LEN(dest));
+    n = sendto(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags, (const struct sockaddr *)RSTRING_PTR(dest), RSTRING_LEN(dest));
   }
   if (n == -1)
     mrb_sys_fail(mrb, "send");
@@ -393,9 +412,14 @@ mrb_ipsocket_ntop(mrb_state *mrb, mrb_value klass)
 { 
   mrb_int af, n;
   char *addr, buf[50];
+  int invalid = 0;
 
   mrb_get_args(mrb, "is", &af, &addr, &n);
-  if ((af == AF_INET && n != 4) || (af == AF_INET6 && n != 16))
+  invalid |= (af == AF_INET && n != 4);
+#ifdef MRBGEM_SOCKET_HAVE_IPv6
+  invalid |= (af == AF_INET6 && n != 16);
+#endif
+  if (invalid)
     mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid address");
   if (inet_ntop(af, addr, buf, sizeof(buf)) == NULL)
     mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid address");
@@ -419,11 +443,13 @@ mrb_ipsocket_pton(mrb_state *mrb, mrb_value klass)
     if (inet_pton(AF_INET, buf, (void *)&in.s_addr) != 1)
       goto invalid;
     return mrb_str_new(mrb, (char *)&in.s_addr, 4);
+#ifdef MRBGEM_SOCKET_HAVE_IPv6
   } else if (af == AF_INET6) {
     struct in6_addr in6;
     if (inet_pton(AF_INET6, buf, (void *)&in6.s6_addr) != 1)
       goto invalid;
     return mrb_str_new(mrb, (char *)&in6.s6_addr, 16);
+#endif
   } else
     mrb_raise(mrb, E_ARGUMENT_ERROR, "unsupported address family");
 
@@ -553,6 +579,7 @@ mrb_socket_sockaddr_family(mrb_state *mrb, mrb_value klass)
 static mrb_value
 mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
 {
+#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
   struct sockaddr_un *sunp;
   mrb_value path, s;
   
@@ -567,6 +594,9 @@ mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
   sunp->sun_path[RSTRING_LEN(path)] = '\0';
   mrb_str_resize(mrb, s, sizeof(struct sockaddr_un));
   return s;
+#else
+  mrb_raisef(mrb, E_NOTIMP_ERROR, "This target doesn't have UNIX domain sockets");
+#endif
 }
 
 static mrb_value
