@@ -6,3 +6,7 @@ env:
 
 script:
   - "ruby run_test.rb all test"
+
+branches:
+  except:
+    - support/original
