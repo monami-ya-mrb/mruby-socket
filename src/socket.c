@@ -143,7 +143,7 @@ mrb_addrinfo_getnameinfo(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_addrinfo_unix_path(mrb_state *mrb, mrb_value self)
 {
-#ifdef SOCKET_C_SUPPORT_UN__
+#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
   mrb_value sastr;
 
   sastr = mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@sockaddr"));
