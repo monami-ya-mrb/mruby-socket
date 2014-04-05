@@ -53,12 +53,16 @@ assert('Addrinfo.udp') do
 end
 
 assert('Addrinfo.unix') do
-  a1 = Addrinfo.unix('/tmp/sock')
-  assert_true(a1.unix?)
-  assert_equal('/tmp/sock', a1.unix_path)
-  assert_equal(Socket::SOCK_STREAM, a1.socktype)
-  a2 = Addrinfo.unix('/tmp/sock', Socket::SOCK_DGRAM)
-  assert_equal(Socket::SOCK_DGRAM, a2.socktype)
+  begin
+    a1 = Addrinfo.unix('/tmp/sock')
+    assert_true(a1.unix?)
+    assert_equal('/tmp/sock', a1.unix_path)
+    assert_equal(Socket::SOCK_STREAM, a1.socktype)
+    a2 = Addrinfo.unix('/tmp/sock', Socket::SOCK_DGRAM)
+    assert_equal(Socket::SOCK_DGRAM, a2.socktype)
+  rescue SocketError => e
+    skip if e.message == "This runtime doesn't support UNIX domains"
+  end
 end
 
 assert('Addrinfo#afamily') do
