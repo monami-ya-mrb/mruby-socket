@@ -4,7 +4,9 @@
 ** See Copyright Notice in mruby.h
 */
 
-#ifndef HAVE_LWIP
+#ifdef HAVE_LWIP
+#define SHUT_RDWR (2) /* dummy */
+#else
 #define MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
 #define MRBGEM_SOCKET_HAVE_IPv6
 #endif
