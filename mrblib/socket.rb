@@ -248,7 +248,11 @@ end
 
 class TCPServer
   def initialize(host=nil, service)
-    ai = Addrinfo.getaddrinfo(host, service, nil, nil, nil, Socket::AI_PASSIVE)[0]
+    begin
+      ai = Addrinfo.getaddrinfo(host, service, nil, nil, nil, Socket::AI_PASSIVE)[0]
+    rescue NameError
+      ai = Addrinfo.tcp(host, service)
+    end
     super(Socket._socket(ai.afamily, Socket::SOCK_STREAM, 0), "r+")
     Socket._bind(self.fileno, ai.to_sockaddr)
     listen(5)
