@@ -4,46 +4,67 @@
 ** See Copyright Notice in mruby.h
 */
 
-#ifdef HAVE_LWIP
-#define SHUT_RDWR (2) /* dummy */
-#else
-#define MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
-#define MRBGEM_SOCKET_HAVE_IPv6
+#include "mruby.h"
+
+/* Some embedded stacks don't support IPv6 */
+#if !defined(HAVE_LWIP) && \
+    !defined(HAVE_IPV6)
+#define HAVE_IPV6
 #endif
 
-#include "mruby.h"
-#include <sys/types.h>
-#include <sys/socket.h>
-#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
+/* Some stacks don't support Unix domain. */
+#if !(defined(_WIN32) || defined(HAVE_LWIP)) && \
+    !defined(HAVE_UNIX_DOMAIN_SOCKETS)
+  #define HAVE_UNIX_DOMAIN_SOCKETS 1
+#endif
+
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
+
+  #define SHUT_RDWR SD_BOTH
+#else
+  #include <sys/types.h>
+  #include <sys/socket.h>
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
 # include <sys/un.h>
 #endif
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netdb.h>
+  #include <netinet/in.h>
+  #include <netinet/tcp.h>
+  #include <arpa/inet.h>
+  #include <fcntl.h>
+  #include <netdb.h>
+  #include <unistd.h>
+  #ifndef SHUT_RDWR
+    /* dummy for some embedded stacks like LwIP. */
+    #define SHUT_RDWR (2)
+  #endif
+#endif
+
 #include <stddef.h>
 #include <string.h>
-#include <unistd.h>
 
+#include "mruby.h"
 #include "mruby/array.h"
 #include "mruby/class.h"
 #include "mruby/data.h"
 #include "mruby/string.h"
 #include "mruby/variable.h"
-#include "mruby/ext/io.h"
 #include "error.h"
 
 #define E_SOCKET_ERROR             (mrb_class_get(mrb, "SocketError"))
 
+#if !defined(mrb_cptr)
+#define mrb_cptr_value(m,p) mrb_voidp_value((m),(p))
+#define mrb_cptr(o) mrb_voidp(o)
+#define mrb_cptr_p(o) mrb_voidp_p(o)
+#endif
 
 static mrb_value
 mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
 {
   struct addrinfo hints, *res0, *res;
-#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
-  struct sockaddr_un sun;
-  mrb_value s;
-#endif
   mrb_value ai, ary, family, lastai, nodename, protocol, sa, service, socktype;
   mrb_int flags;
   int arena_idx, error;
@@ -51,10 +72,6 @@ mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
 
   ary = mrb_ary_new(mrb);
   arena_idx = mrb_gc_arena_save(mrb);  /* ary must be on arena! */
-
-#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
-  s = mrb_str_new(mrb, (void *)&sun, sizeof(sun));
-#endif
 
   family = socktype = protocol = mrb_nil_value();
   flags = 0;
@@ -90,8 +107,8 @@ mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
   }
 
   lastai = mrb_cv_get(mrb, klass, mrb_intern_lit(mrb, "_lastai"));
-  if (mrb_voidp_p(lastai)) {
-    freeaddrinfo(mrb_voidp(lastai));
+  if (mrb_cptr_p(lastai)) {
+    freeaddrinfo(mrb_cptr(lastai));
     mrb_cv_set(mrb, klass, mrb_intern_lit(mrb, "_lastai"), mrb_nil_value());
   }
 
@@ -99,7 +116,7 @@ mrb_addrinfo_getaddrinfo(mrb_state *mrb, mrb_value klass)
   if (error) {
     mrb_raisef(mrb, E_SOCKET_ERROR, "getaddrinfo: %S", mrb_str_new_cstr(mrb, gai_strerror(error)));
   }
-  mrb_cv_set(mrb, klass, mrb_intern_lit(mrb, "_lastai"), mrb_voidp_value(mrb, res0));
+  mrb_cv_set(mrb, klass, mrb_intern_lit(mrb, "_lastai"), mrb_cptr_value(mrb, res0));
 
   for (res = res0; res != NULL; res = res->ai_next) {
     sa = mrb_str_new(mrb, (void *)res->ai_addr, res->ai_addrlen);
@@ -142,21 +159,18 @@ mrb_addrinfo_getnameinfo(mrb_state *mrb, mrb_value self)
   return ary;
 }
 
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
 static mrb_value
 mrb_addrinfo_unix_path(mrb_state *mrb, mrb_value self)
 {
-#ifdef SOCKET_C_SUPPORT_UN__
   mrb_value sastr;
 
   sastr = mrb_iv_get(mrb, self, mrb_intern_lit(mrb, "@sockaddr"));
   if (((struct sockaddr *)RSTRING_PTR(sastr))->sa_family != AF_UNIX)
     mrb_raise(mrb, E_SOCKET_ERROR, "need AF_UNIX address");
   return mrb_str_new_cstr(mrb, ((struct sockaddr_un *)RSTRING_PTR(sastr))->sun_path);
-#else
-  mrb_raise(mrb, E_SOCKET_ERROR, "This runtime doesn't support UNIX domains");
-  return mrb_nil_value(); /* NOT REACHED */
-#endif
 }
+#endif
 
 static mrb_value
 sa2addrlist(mrb_state *mrb, const struct sockaddr *sa, socklen_t salen)
@@ -170,7 +184,7 @@ sa2addrlist(mrb_state *mrb, const struct sockaddr *sa, socklen_t salen)
     afstr = "AF_INET";
     port = ((struct sockaddr_in *)sa)->sin_port;
     break;
-#ifdef MRBGEM_SOCKET_HAVE_IPv6
+#ifdef HAVE_IPV6
   case AF_INET6:
     afstr = "AF_INET6";
     port = ((struct sockaddr_in6 *)sa)->sin6_port;
@@ -263,7 +277,8 @@ mrb_basicsocket_getsockname(mrb_state *mrb, mrb_value self)
 static mrb_value
 mrb_basicsocket_getsockopt(mrb_state *mrb, mrb_value self)
 { 
-  int opt, s;
+  char opt[8];
+  int s;
   mrb_int family, level, optname;
   mrb_value c, data;
   socklen_t optlen;
@@ -271,11 +286,11 @@ mrb_basicsocket_getsockopt(mrb_state *mrb, mrb_value self)
   mrb_get_args(mrb, "ii", &level, &optname);
   s = socket_fd(mrb, self);
   optlen = sizeof(opt);
-  if (getsockopt(s, level, optname, &opt, &optlen) == -1)
+  if (getsockopt(s, level, optname, opt, &optlen) == -1)
     mrb_sys_fail(mrb, "getsockopt");
   c = mrb_const_get(mrb, mrb_obj_value(mrb_class_get(mrb, "Socket")), mrb_intern_lit(mrb, "Option"));
   family = socket_family(s);
-  data = mrb_str_new(mrb, (char *)&opt, sizeof(int));
+  data = mrb_str_new(mrb, opt, optlen);
   return mrb_funcall(mrb, c, "new", 4, mrb_fixnum_value(family), mrb_fixnum_value(level), mrb_fixnum_value(optname), data);
 }
 
@@ -330,7 +345,7 @@ mrb_basicsocket_send(mrb_state *mrb, mrb_value self)
   if (mrb_nil_p(dest)) {
     n = send(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags);
   } else {
-    n = sendto(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags, (const struct sockaddr *)RSTRING_PTR(dest), RSTRING_LEN(dest));
+    n = sendto(socket_fd(mrb, self), RSTRING_PTR(mesg), RSTRING_LEN(mesg), flags, (const void *)RSTRING_PTR(dest), RSTRING_LEN(dest));
   }
   if (n == -1)
     mrb_sys_fail(mrb, "send");
@@ -342,10 +357,17 @@ mrb_basicsocket_setnonblock(mrb_state *mrb, mrb_value self)
 { 
   int fd, flags;
   mrb_value bool;
+#ifdef _WIN32
+  u_long mode = 1;
+#endif
 
   mrb_get_args(mrb, "o", &bool);
   fd = socket_fd(mrb, self);
-
+#ifdef _WIN32
+  flags = ioctlsocket(fd, FIONBIO, &mode);
+  if (flags != NO_ERROR)
+    mrb_sys_fail(mrb, "ioctlsocket");
+#else
   flags = fcntl(fd, F_GETFL, 0);
   if (flags == 1)
     mrb_sys_fail(mrb, "fcntl");
@@ -355,6 +377,7 @@ mrb_basicsocket_setnonblock(mrb_state *mrb, mrb_value self)
     flags &= ~O_NONBLOCK;
   if (fcntl(fd, F_SETFL, flags) == -1)
     mrb_sys_fail(mrb, "fcntl");
+#endif
   return mrb_nil_value();
 }
 
@@ -418,7 +441,7 @@ mrb_ipsocket_ntop(mrb_state *mrb, mrb_value klass)
 
   mrb_get_args(mrb, "is", &af, &addr, &n);
   invalid |= (af == AF_INET && n != 4);
-#ifdef MRBGEM_SOCKET_HAVE_IPv6
+#ifdef HAVE_IPV6
   invalid |= (af == AF_INET6 && n != 16);
 #endif
   if (invalid)
@@ -445,7 +468,7 @@ mrb_ipsocket_pton(mrb_state *mrb, mrb_value klass)
     if (inet_pton(AF_INET, buf, (void *)&in.s_addr) != 1)
       goto invalid;
     return mrb_str_new(mrb, (char *)&in.s_addr, 4);
-#ifdef MRBGEM_SOCKET_HAVE_IPv6
+#ifdef HAVE_IPV6
   } else if (af == AF_INET6) {
     struct in6_addr in6;
     if (inet_pton(AF_INET6, buf, (void *)&in6.s6_addr) != 1)
@@ -572,16 +595,22 @@ mrb_socket_sockaddr_family(mrb_state *mrb, mrb_value klass)
   mrb_value sa;
 
   mrb_get_args(mrb, "S", &sa);
+#ifdef __linux__
+  if (RSTRING_LEN(sa) < offsetof(struct sockaddr, sa_family) + sizeof(sa_family_t)) {
+    mrb_raisef(mrb, E_SOCKET_ERROR, "invalid sockaddr (too short)");
+  }
+#else
   if (RSTRING_LEN(sa) < sizeof(struct sockaddr)) {
     mrb_raisef(mrb, E_SOCKET_ERROR, "invalid sockaddr (too short)");
   }
+#endif
   return mrb_fixnum_value(((struct sockaddr *)RSTRING_PTR(sa))->sa_family);
 }
 
 static mrb_value
 mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
 {
-#ifdef MRBGEM_SOCKET_HAVE_UNIX_DOMAIN
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   struct sockaddr_un *sunp;
   mrb_value path, s;
   
@@ -597,13 +626,18 @@ mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
   mrb_str_resize(mrb, s, sizeof(struct sockaddr_un));
   return s;
 #else
-  mrb_raisef(mrb, E_NOTIMP_ERROR, "This target doesn't have UNIX domain sockets");
+  mrb_raise(mrb, E_NOTIMP_ERROR, "sockaddr_un unsupported on this target");
+  return mrb_nil_value();
 #endif
 }
 
 static mrb_value
 mrb_socket_socketpair(mrb_state *mrb, mrb_value klass)
 {
+#ifdef _WIN32
+  mrb_raise(mrb, E_NOTIMP_ERROR, "socketpair unsupported on Windows");
+  return mrb_nil_value();
+#else
   mrb_value ary;
   mrb_int domain, type, protocol;
   int sv[2];
@@ -617,6 +651,7 @@ mrb_socket_socketpair(mrb_state *mrb, mrb_value klass)
   mrb_ary_push(mrb, ary, mrb_fixnum_value(sv[0]));
   mrb_ary_push(mrb, ary, mrb_fixnum_value(sv[1]));
   return ary;
+#endif
 }
 
 static mrb_value
@@ -632,17 +667,151 @@ mrb_socket_socket(mrb_state *mrb, mrb_value klass)
   return mrb_fixnum_value(s);
 }
 
+static mrb_value
+mrb_tcpsocket_allocate(mrb_state *mrb, mrb_value klass)
+{
+  struct RClass *c = mrb_class_ptr(klass);
+  enum mrb_vtype ttype = MRB_INSTANCE_TT(c);
+
+  /* copied from mrb_instance_alloc() */
+  if (ttype == 0) ttype = MRB_TT_OBJECT;
+  return mrb_obj_value((struct RObject*)mrb_obj_alloc(mrb, ttype, c));
+}
+
+/* Windows overrides for IO methods on BasicSocket objects.
+ * This is because sockets on Windows are not the same as file
+ * descriptors, and thus functions which operate on file descriptors
+ * will break on socket descriptors.
+ */
+#ifdef _WIN32
+static mrb_value
+mrb_win32_basicsocket_close(mrb_state *mrb, mrb_value self)
+{
+  if (closesocket(socket_fd(mrb, self)) != NO_ERROR)
+    mrb_raise(mrb, E_SOCKET_ERROR, "closesocket unsuccessful");
+  return mrb_nil_value();
+}
+
+static mrb_value
+mrb_win32_basicsocket_read(mrb_state *mrb, mrb_value self)
+{
+#define BUF_LEN 4096
+  char buf[BUF_LEN];
+  int sd, bytes_read;
+  mrb_int read_len;
+  mrb_value str = mrb_str_new(mrb, NULL, 0);
+  mrb_value len_arg = mrb_nil_value();
+
+  /* For compatibility with IO::read, we accept an object instead of just
+   * an mrb_int. Then we raise an exception if it isn't an mrb_int or nil.
+   */
+  mrb_get_args(mrb, "|o", &len_arg);
+  if (mrb_fixnum_p(len_arg)) {
+    read_len = mrb_fixnum(len_arg);
+    if (read_len < 0) {
+      mrb_str_cat_cstr(mrb, str, "negative length: ");
+      mrb_str_append(mrb, str, len_arg);
+      mrb_str_cat_cstr(mrb, str, " given");
+      mrb_raise(mrb, E_ARGUMENT_ERROR, mrb_string_value_cstr(mrb, &str));
+      return mrb_nil_value();
+    } else if (read_len == 0) {
+      return str;
+    }
+  } else if (mrb_nil_p(len_arg)) {
+    read_len = 0;
+  } else {
+    mrb_str_cat_cstr(mrb, str, "can't convert ");
+    mrb_str_append(mrb, str, len_arg);
+    mrb_str_cat_cstr(mrb, str, " into Integer");
+    mrb_raise(mrb, E_TYPE_ERROR, mrb_string_value_cstr(mrb, &str));
+    return mrb_nil_value();
+  }
+
+  sd = socket_fd(mrb, self);
+  bytes_read = 0;
+
+  /* Behavior of positive integer argument: read until length bytes have been
+   * read, or until the socket has closed. */
+  if (read_len > 0) {
+    int n = 0;
+    int max_read_len = BUF_LEN;
+    int keep_reading = 1;
+    while (keep_reading) {
+      if (max_read_len > (read_len - bytes_read))
+        max_read_len = read_len - bytes_read;
+      n = recv(sd, buf, max_read_len, 0);
+
+      if (n == SOCKET_ERROR) {
+        mrb_sys_fail(mrb, "recv");
+      } else if (n == 0) {
+        keep_reading = 0;
+      } else {
+        mrb_str_cat(mrb, str, buf, n);
+        bytes_read += n;
+        if (bytes_read >= read_len)
+          keep_reading = 0;
+      }
+    }
+  }
+  /* Behavior of nil/default argument: read until socket has closed */
+  else {
+    int keep_reading = 1;
+    while (keep_reading) {
+      bytes_read = recv(sd, buf, BUF_LEN, 0);
+      if (bytes_read == SOCKET_ERROR) {
+        mrb_sys_fail(mrb, "recv");
+      } else if (bytes_read == 0) {
+        keep_reading = 0;
+      } else {
+        mrb_str_cat(mrb, str, buf, bytes_read);
+      }
+    }
+  }
+
+  return str;
+#undef BUF_LEN
+}
+
+static mrb_value
+mrb_win32_basicsocket_write(mrb_state *mrb, mrb_value self)
+{
+  int n;
+  SOCKET sd;
+  mrb_value str;
+
+  sd = socket_fd(mrb, self);
+  mrb_get_args(mrb, "S", &str);
+  n = send(sd, RSTRING_PTR(str), RSTRING_LEN(str), 0);
+  if (n == SOCKET_ERROR)
+    mrb_sys_fail(mrb, "send");
+  return mrb_fixnum_value(n);
+}
+
+#endif
+
 void
 mrb_mruby_socket_gem_init(mrb_state* mrb)
 {
-  struct RClass *io, *ai, *sock, *bsock, *ipsock, *tcpsock, *udpsock, *usock;
+  struct RClass *io, *ai, *sock, *bsock, *ipsock, *tcpsock, *udpsock;
   struct RClass *constants;
+
+#ifdef _WIN32
+  WSADATA wsaData;
+  int result;
+  result = WSAStartup(MAKEWORD(2,2), &wsaData);
+  if (result != NO_ERROR)
+    mrb_raise(mrb, E_RUNTIME_ERROR, "WSAStartup failed");
+#else
+  struct RClass *usock;
+#endif
 
   ai = mrb_define_class(mrb, "Addrinfo", mrb->object_class);
   mrb_mod_cv_set(mrb, ai, mrb_intern_lit(mrb, "_lastai"), mrb_nil_value());
   mrb_define_class_method(mrb, ai, "getaddrinfo", mrb_addrinfo_getaddrinfo, MRB_ARGS_REQ(2)|MRB_ARGS_OPT(4));
   mrb_define_method(mrb, ai, "getnameinfo", mrb_addrinfo_getnameinfo, MRB_ARGS_OPT(1));
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   mrb_define_method(mrb, ai, "unix_path", mrb_addrinfo_unix_path, MRB_ARGS_NONE());
+#endif
 
   io = mrb_class_get(mrb, "IO");
 
@@ -667,8 +836,7 @@ mrb_mruby_socket_gem_init(mrb_state* mrb)
   mrb_define_method(mrb, ipsock, "recvfrom", mrb_ipsocket_recvfrom, MRB_ARGS_REQ(1)|MRB_ARGS_OPT(1));
 
   tcpsock = mrb_define_class(mrb, "TCPSocket", ipsock);
-  //mrb_define_class_method(mrb, tcpsock, "open", mrb_tcpsocket_open, MRB_ARGS_REQ(2)|MRB_ARGS_OPT(2));
-  //mrb_define_class_method(mrb, tcpsock, "new", mrb_tcpsocket_open, MRB_ARGS_REQ(2)|MRB_ARGS_OPT(2));
+  mrb_define_class_method(mrb, tcpsock, "_allocate", mrb_tcpsocket_allocate, MRB_ARGS_NONE());
   mrb_define_class(mrb, "TCPServer", tcpsock);
 
   udpsock = mrb_define_class(mrb, "UDPSocket", ipsock);
@@ -690,13 +858,22 @@ mrb_mruby_socket_gem_init(mrb_state* mrb)
   mrb_define_class_method(mrb, sock, "socketpair", mrb_socket_socketpair, MRB_ARGS_REQ(3));
   //mrb_define_method(mrb, sock, "sysaccept", mrb_socket_accept, MRB_ARGS_NONE());
 
-  usock = mrb_define_class(mrb, "UNIXSocket", io);
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
+  usock = mrb_define_class(mrb, "UNIXSocket", bsock);
+#endif
   //mrb_define_class_method(mrb, usock, "pair", mrb_unixsocket_open, MRB_ARGS_OPT(2));
   //mrb_define_class_method(mrb, usock, "socketpair", mrb_unixsocket_open, MRB_ARGS_OPT(2));
 
   //mrb_define_method(mrb, usock, "recv_io", mrb_unixsocket_peeraddr, MRB_ARGS_NONE());
   //mrb_define_method(mrb, usock, "recvfrom", mrb_unixsocket_peeraddr, MRB_ARGS_NONE());
   //mrb_define_method(mrb, usock, "send_io", mrb_unixsocket_peeraddr, MRB_ARGS_NONE());
+
+  /* Windows IO Method Overrides on BasicSocket */
+#ifdef _WIN32
+  mrb_define_method(mrb, bsock, "close", mrb_win32_basicsocket_close, MRB_ARGS_NONE());
+  mrb_define_method(mrb, bsock, "read",  mrb_win32_basicsocket_read,  MRB_ARGS_OPT(1));
+  mrb_define_method(mrb, bsock, "write", mrb_win32_basicsocket_write, MRB_ARGS_REQ(1));
+#endif
 
   constants = mrb_define_module_under(mrb, sock, "Constants");
 
@@ -713,7 +890,10 @@ mrb_mruby_socket_gem_final(mrb_state* mrb)
 {
   mrb_value ai;
   ai = mrb_mod_cv_get(mrb, mrb_class_get(mrb, "Addrinfo"), mrb_intern_lit(mrb, "_lastai"));
-  if (mrb_voidp_p(ai)) {
-    freeaddrinfo(mrb_voidp(ai));
+  if (mrb_cptr_p(ai)) {
+    freeaddrinfo(mrb_cptr(ai));
   }
+#ifdef _WIN32
+  WSACleanup();
+#endif
 }

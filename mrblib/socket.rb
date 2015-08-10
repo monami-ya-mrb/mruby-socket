@@ -63,9 +63,9 @@ class Addrinfo
 
   def inspect
     if ipv4? or ipv6?
-      if @protocol == Socket::IPPROTO_TCP
+      if @protocol == Socket::IPPROTO_TCP or (@socktype == Socket::SOCK_STREAM and @protocol == 0)
         proto = 'TCP'
-      elsif @protocol == Socket::IPPROTO_UDP
+      elsif @protocol == Socket::IPPROTO_UDP or (@socktype == Socket::SOCK_DGRAM and @protocol == 0)
         proto = 'UDP'
       else
         proto = '???'
@@ -181,6 +181,10 @@ class BasicSocket
     @do_not_reverse_lookup = @@do_not_reverse_lookup
   end
 
+  def self.for_fd(fd)
+    super(fd, "r+")
+  end
+
   #def connect_address
 
   def local_address
@@ -224,7 +228,7 @@ end
 
 class TCPSocket
   def initialize(host, service, local_host=nil, local_service=nil)
-    if self.is_a? TCPServer
+    if @init_with_fd
       super(host, service)
     else
       s = nil
@@ -243,16 +247,20 @@ class TCPSocket
     end
   end
 
+  def self.new_with_prelude pre, *args
+    o = self._allocate
+    o.instance_eval(&pre)
+    o.initialize(*args)
+    o
+  end
+
   #def self.gethostbyname(host)
 end
 
 class TCPServer
   def initialize(host=nil, service)
-    begin
-      ai = Addrinfo.getaddrinfo(host, service, nil, nil, nil, Socket::AI_PASSIVE)[0]
-    rescue NameError
-      ai = Addrinfo.tcp(host, service)
-    end
+    ai = Addrinfo.getaddrinfo(host, service, nil, nil, nil, Socket::AI_PASSIVE)[0]
+    @init_with_fd = true
     super(Socket._socket(ai.afamily, Socket::SOCK_STREAM, 0), "r+")
     Socket._bind(self.fileno, ai.to_sockaddr)
     listen(5)
@@ -260,7 +268,13 @@ class TCPServer
   end
 
   def accept
-    TCPSocket.for_fd(self.sysaccept)
+    fd = self.sysaccept
+    begin
+      TCPSocket.new_with_prelude(proc { @init_with_fd = true }, fd, "r+")
+    rescue
+      IO._sysclose(fd) rescue nil
+      raise
+    end
   end
 
   def accept_nonblock
@@ -425,7 +439,8 @@ class Socket
 
   def recvfrom(maxlen, flags=0)
     msg, sa = _recvfrom(maxlen, flags)
-    [ msg, _ai_to_array(Addrinfo.new(sa)) ]
+    socktype = self.getsockopt(Socket::SOL_SOCKET, Socket::SO_TYPE).int
+    [ msg, Addrinfo.new(sa, Socket::PF_UNSPEC, socktype) ]
   end
 
   def recvfrom_nonblock(*args)
@@ -442,14 +457,24 @@ class Socket
   end
 end
 
-class UNIXSocket
+class UNIXSocket < BasicSocket
   def initialize(path, &block)
-    super(Socket._socket(AF_UNIX, SOCK_STREAM, 0), "r+")
-    Socket._connect(self.fileno, Socket.sockaddr_un(path))
-    if block
-      block.call(self)
+    if self.is_a? UNIXServer
+      super(path, "r")
     else
-      self
+      super(Socket._socket(Socket::AF_UNIX, Socket::SOCK_STREAM, 0), "r+")
+      Socket._connect(self.fileno, Socket.sockaddr_un(path))
+
+      if block_given?
+        begin
+          yield self
+        ensure
+          begin
+            self.close unless self.closed?
+          rescue StandardError
+          end
+        end
+      end
     end
   end
 
@@ -478,23 +503,42 @@ class UNIXSocket
 
   def recvfrom(maxlen, flags=0)
     msg, sa = _recvfrom(maxlen, flags)
-    [ msg, [ "AF_UNIX", Addrinfo.new(sa).unix_path ] ]
+    path = (sa.size > 0) ? Addrinfo.new(sa).unix_path : ""
+    [ msg, [ "AF_UNIX", path ] ]
   end
 
   #def send_io
 end
 
-class UNIXServer
-  def initialize(path, &block)
-    super(Socket._socket(Socket::AF_UNIX, Socket::SOCK_STREAM, 0), "r")
-    Socket._bind(self.fileno, Socket.pack_sockaddr_un(path))
-    listen(5)
-    self
+class UNIXServer < UNIXSocket
+  def initialize(path)
+    fd = Socket._socket(Socket::AF_UNIX, Socket::SOCK_STREAM, 0)
+    begin
+      super(fd)
+      Socket._bind(fd, Socket.pack_sockaddr_un(path))
+      self.listen(5)
+    rescue => e
+      IO._sysclose(fd) rescue nil
+      raise e
+    end
+
+    if block_given?
+      begin
+        yield self
+      ensure
+        self.close rescue nil unless self.closed?
+      end
+    end
   end
 
   def accept
-    fd, addr = self.sysaccept
-    [ UNIXSocket.for_fd(fd), addr ]
+    fd = self.sysaccept
+    begin
+      sock = UNIXSocket.for_fd(fd)
+    rescue
+      IO._sysclose(fd) rescue nil
+    end
+    sock
   end
 
   def accept_nonblock
@@ -547,7 +591,7 @@ class Socket
     end
 
     def inspect
-      # notyet
+      "#<Socket::Option: family:#{@family} level:#{@level} optname:#{@optname} #{@data.inspect}>"
     end
 
     def int
