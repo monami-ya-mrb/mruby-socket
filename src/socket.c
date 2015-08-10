@@ -802,7 +802,9 @@ mrb_mruby_socket_gem_init(mrb_state* mrb)
   if (result != NO_ERROR)
     mrb_raise(mrb, E_RUNTIME_ERROR, "WSAStartup failed");
 #else
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   struct RClass *usock;
+#endif
 #endif
 
   ai = mrb_define_class(mrb, "Addrinfo", mrb->object_class);
