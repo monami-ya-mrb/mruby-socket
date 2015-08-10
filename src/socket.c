@@ -4,6 +4,20 @@
 ** See Copyright Notice in mruby.h
 */
 
+#include "mruby.h"
+
+/* Some embedded stacks don't support IPv6 */
+#if !defined(HAVE_LWIP) && \
+    !defined(HAVE_IPV6)
+#define HAVE_IPV6
+#endif
+
+/* Some stacks don't support Unix domain. */
+#if !(defined(_WIN32) || defined(HAVE_LWIP)) && \
+    !defined(HAVE_UNIX_DOMAIN_SOCKETS)
+  #define HAVE_UNIX_DOMAIN_SOCKETS 1
+#endif
+
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
@@ -13,13 +27,19 @@
 #else
   #include <sys/types.h>
   #include <sys/socket.h>
-  #include <sys/un.h>
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
+# include <sys/un.h>
+#endif
   #include <netinet/in.h>
   #include <netinet/tcp.h>
   #include <arpa/inet.h>
   #include <fcntl.h>
   #include <netdb.h>
   #include <unistd.h>
+  #ifndef SHUT_RDWR
+    /* dummy for some embedded stacks like LwIP. */
+    #define SHUT_RDWR (2)
+  #endif
 #endif
 
 #include <stddef.h>
@@ -139,7 +159,7 @@ mrb_addrinfo_getnameinfo(mrb_state *mrb, mrb_value self)
   return ary;
 }
 
-#ifndef _WIN32
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
 static mrb_value
 mrb_addrinfo_unix_path(mrb_state *mrb, mrb_value self)
 {
@@ -164,10 +184,12 @@ sa2addrlist(mrb_state *mrb, const struct sockaddr *sa, socklen_t salen)
     afstr = "AF_INET";
     port = ((struct sockaddr_in *)sa)->sin_port;
     break;
+#ifdef HAVE_IPV6
   case AF_INET6:
     afstr = "AF_INET6";
     port = ((struct sockaddr_in6 *)sa)->sin6_port;
     break;
+#endif
   default:
     mrb_raise(mrb, E_ARGUMENT_ERROR, "bad af");
     return mrb_nil_value();
@@ -415,9 +437,14 @@ mrb_ipsocket_ntop(mrb_state *mrb, mrb_value klass)
 { 
   mrb_int af, n;
   char *addr, buf[50];
+  int invalid = 0;
 
   mrb_get_args(mrb, "is", &af, &addr, &n);
-  if ((af == AF_INET && n != 4) || (af == AF_INET6 && n != 16))
+  invalid |= (af == AF_INET && n != 4);
+#ifdef HAVE_IPV6
+  invalid |= (af == AF_INET6 && n != 16);
+#endif
+  if (invalid)
     mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid address");
   if (inet_ntop(af, addr, buf, sizeof(buf)) == NULL)
     mrb_raise(mrb, E_ARGUMENT_ERROR, "invalid address");
@@ -441,11 +468,13 @@ mrb_ipsocket_pton(mrb_state *mrb, mrb_value klass)
     if (inet_pton(AF_INET, buf, (void *)&in.s_addr) != 1)
       goto invalid;
     return mrb_str_new(mrb, (char *)&in.s_addr, 4);
+#ifdef HAVE_IPV6
   } else if (af == AF_INET6) {
     struct in6_addr in6;
     if (inet_pton(AF_INET6, buf, (void *)&in6.s6_addr) != 1)
       goto invalid;
     return mrb_str_new(mrb, (char *)&in6.s6_addr, 16);
+#endif
   } else
     mrb_raise(mrb, E_ARGUMENT_ERROR, "unsupported address family");
 
@@ -581,10 +610,7 @@ mrb_socket_sockaddr_family(mrb_state *mrb, mrb_value klass)
 static mrb_value
 mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
 {
-#ifdef _WIN32
-  mrb_raise(mrb, E_NOTIMP_ERROR, "sockaddr_un unsupported on Windows");
-  return mrb_nil_value();
-#else
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   struct sockaddr_un *sunp;
   mrb_value path, s;
   
@@ -599,6 +625,9 @@ mrb_socket_sockaddr_un(mrb_state *mrb, mrb_value klass)
   sunp->sun_path[RSTRING_LEN(path)] = '\0';
   mrb_str_resize(mrb, s, sizeof(struct sockaddr_un));
   return s;
+#else
+  mrb_raise(mrb, E_NOTIMP_ERROR, "sockaddr_un unsupported on this target");
+  return mrb_nil_value();
 #endif
 }
 
@@ -773,14 +802,16 @@ mrb_mruby_socket_gem_init(mrb_state* mrb)
   if (result != NO_ERROR)
     mrb_raise(mrb, E_RUNTIME_ERROR, "WSAStartup failed");
 #else
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   struct RClass *usock;
+#endif
 #endif
 
   ai = mrb_define_class(mrb, "Addrinfo", mrb->object_class);
   mrb_mod_cv_set(mrb, ai, mrb_intern_lit(mrb, "_lastai"), mrb_nil_value());
   mrb_define_class_method(mrb, ai, "getaddrinfo", mrb_addrinfo_getaddrinfo, MRB_ARGS_REQ(2)|MRB_ARGS_OPT(4));
   mrb_define_method(mrb, ai, "getnameinfo", mrb_addrinfo_getnameinfo, MRB_ARGS_OPT(1));
-#ifndef _WIN32
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   mrb_define_method(mrb, ai, "unix_path", mrb_addrinfo_unix_path, MRB_ARGS_NONE());
 #endif
 
@@ -829,7 +860,7 @@ mrb_mruby_socket_gem_init(mrb_state* mrb)
   mrb_define_class_method(mrb, sock, "socketpair", mrb_socket_socketpair, MRB_ARGS_REQ(3));
   //mrb_define_method(mrb, sock, "sysaccept", mrb_socket_accept, MRB_ARGS_NONE());
 
-#ifndef _WIN32
+#ifdef HAVE_UNIX_DOMAIN_SOCKETS
   usock = mrb_define_class(mrb, "UNIXSocket", bsock);
 #endif
   //mrb_define_class_method(mrb, usock, "pair", mrb_unixsocket_open, MRB_ARGS_OPT(2));
